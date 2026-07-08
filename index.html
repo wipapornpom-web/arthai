@@ -1,0 +1,229 @@
+from pathlib import Path
+
+words = ["ครอบครัว","กลมเกลียว","ไขว้เขว","หมึกดำ","เหนื่อยล้า","ใบหม่อน","หมวดหมู่","ตลบ","ฝรั่ง","อร่อย","พระจันทร์","ประยุกต์","วิเคราะห์","สงกรานต์","เล่ห์กล","ศักดิ์ศรี","บรรเจิด","บรรจุ","ตาลโตนด","เฉลียวฉลาด"]
+
+html = f"""<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>เกม AI ลากตัวอักษรด้วยมือ ภาษาไทย</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;font-family:sans-serif;background:#111;color:white;overflow:hidden}}
+#wrap{{position:relative;width:100vw;height:100vh;background:#111}}
+video,canvas{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}}
+#overlay{{position:absolute;inset:0;background:rgba(0,0,0,.18)}}
+#ui{{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;padding:16px;gap:14px}}
+#top{{width:100%;display:flex;justify-content:space-between;align-items:center;font-size:28px;font-weight:bold;text-shadow:2px 2px 5px #000}}
+#target{{font-size:46px;background:rgba(0,0,0,.55);padding:8px 24px;border-radius:18px;border:3px solid #fff;text-shadow:2px 2px 5px #000}}
+#slots{{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;max-width:94vw;margin-top:8px}}
+.slot{{width:74px;height:82px;border:4px dashed #fff;border-radius:16px;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:48px;font-weight:bold}}
+.slot.filled{{background:#9cffb1;color:#111;border-style:solid}}
+#letters{{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}}
+.letter{{position:absolute;width:76px;height:76px;border-radius:18px;background:#ffd84d;color:#111;border:5px solid white;display:flex;align-items:center;justify-content:center;font-size:46px;font-weight:bold;box-shadow:0 8px 18px #000;transition:transform .08s}}
+.letter.hover{{transform:scale(1.18);background:#79e6ff}}
+.letter.dragging{{background:#ff9cf1;z-index:20;transform:scale(1.2)}}
+#cursor{{position:absolute;width:38px;height:38px;border-radius:50%;background:#29d9ff;border:5px solid white;box-shadow:0 0 22px #29d9ff;z-index:30;display:none;transform:translate(-50%,-50%)}}
+#msg{{font-size:42px;font-weight:bold;text-shadow:2px 2px 6px #000;height:52px}}
+#start{{position:absolute;z-index:50;left:50%;top:50%;transform:translate(-50%,-50%);font-size:30px;padding:22px 36px;border:0;border-radius:18px;background:#37d67a;color:#111;font-weight:bold}}
+#help{{position:absolute;bottom:10px;left:10px;background:rgba(0,0,0,.6);padding:10px 14px;border-radius:12px;font-size:18px;max-width:95vw}}
+#done{{display:none;position:absolute;inset:0;background:rgba(0,0,0,.82);z-index:40;align-items:center;justify-content:center;flex-direction:column;text-align:center;gap:20px}}
+#done h1{{font-size:62px;margin:0}}
+#done p{{font-size:38px;margin:0}}
+#restart{{font-size:30px;padding:16px 26px;border:0;border-radius:16px;background:#ffd84d;font-weight:bold}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="video" autoplay playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div id="overlay"></div>
+  <div id="letters"></div>
+  <div id="cursor"></div>
+  <button id="start">เริ่มเกม / เปิดกล้อง</button>
+
+  <div id="ui">
+    <div id="top">
+      <div id="round">ข้อ 1/20</div>
+      <div id="score">คะแนน 0</div>
+    </div>
+    <div id="target">เรียงตัวอักษรให้เป็นคำ</div>
+    <div id="slots"></div>
+    <div id="msg"></div>
+  </div>
+
+  <div id="done">
+    <h1>จบเกมแล้ว 🎉</h1>
+    <p id="finalScore"></p>
+    <button id="restart">เล่นใหม่</button>
+  </div>
+
+  <div id="help">วิธีเล่น: ชี้นิ้วค้างบนตัวอักษร 0.5 วินาทีเพื่อจับ → ลากไปช่อง → ชี้ค้างบนช่อง 0.5 วินาทีเพื่อวาง</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script>
+const WORDS = {words!r};
+let round = 0, score = 0;
+let placed = [];
+let dragging = null;
+let hoverObj = null, hoverStart = 0;
+let lastX=0, lastY=0;
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const cursor = document.getElementById('cursor');
+const lettersEl = document.getElementById('letters');
+const slotsEl = document.getElementById('slots');
+const msgEl = document.getElementById('msg');
+
+function charsOf(w){{ return Array.from(w.replace(/\\s/g,'')); }}
+function shuffle(a){{ for(let i=a.length-1;i>0;i--){{let j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}} return a; }}
+
+function speak(t){{
+  try{{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(t); u.lang='th-TH'; speechSynthesis.speak(u); }}catch(e){{}}
+}}
+
+function newRound(){{
+  if(round >= WORDS.length){{
+    document.getElementById('done').style.display='flex';
+    document.getElementById('finalScore').textContent = `ได้คะแนน ${{score}} / ${{WORDS.length}}`;
+    return;
+  }}
+  const word = WORDS[round];
+  const chars = charsOf(word);
+  placed = Array(chars.length).fill("");
+  document.getElementById('round').textContent = `ข้อ ${{round+1}}/${{WORDS.length}}`;
+  document.getElementById('score').textContent = `คะแนน ${{score}}`;
+  document.getElementById('target').textContent = "เรียงตัวอักษรให้เป็นคำ";
+  msgEl.textContent = "";
+  slotsEl.innerHTML = "";
+  lettersEl.innerHTML = "";
+  chars.forEach((c,i)=>{{
+    const s=document.createElement('div');
+    s.className='slot';
+    s.dataset.index=i;
+    slotsEl.appendChild(s);
+  }});
+  const shuffled = shuffle(chars.map((c,i)=>({{c,id:i}})));
+  const startY = innerHeight*0.62;
+  shuffled.forEach((o,i)=>{{
+    const el=document.createElement('div');
+    el.className='letter';
+    el.textContent=o.c;
+    el.dataset.char=o.c;
+    el.dataset.id=o.id;
+    let cols = Math.min(shuffled.length, 10);
+    let row = Math.floor(i/cols);
+    let col = i%cols;
+    let gap = innerWidth/(cols+1);
+    el.style.left = (gap*(col+1)-38) + 'px';
+    el.style.top = (startY + row*90) + 'px';
+    lettersEl.appendChild(el);
+  }});
+  dragging=null; hoverObj=null; hoverStart=0;
+}}
+
+function elementAtPointClass(x,y,cls){{
+  const els = document.querySelectorAll(cls);
+  for(const el of els){{
+    const r=el.getBoundingClientRect();
+    if(x>=r.left && x<=r.right && y>=r.top && y<=r.bottom) return el;
+  }}
+  return null;
+}}
+
+function processPointer(x,y){{
+  lastX=x; lastY=y;
+  if(dragging){{
+    dragging.style.left = (x-38)+'px';
+    dragging.style.top = (y-38)+'px';
+    const slot = elementAtPointClass(x,y,'.slot');
+    const obj = slot ? 'slot-'+slot.dataset.index : null;
+    if(obj !== hoverObj){{ hoverObj=obj; hoverStart=performance.now(); }}
+    else if(slot && performance.now()-hoverStart>500){{
+      const idx = Number(slot.dataset.index);
+      if(!placed[idx]){{
+        placed[idx] = dragging.dataset.char;
+        slot.textContent = dragging.dataset.char;
+        slot.classList.add('filled');
+        dragging.remove();
+        dragging=null; hoverObj=null; hoverStart=0;
+        checkComplete();
+      }}
+    }}
+    return;
+  }}
+
+  document.querySelectorAll('.letter').forEach(e=>e.classList.remove('hover'));
+  const letter = elementAtPointClass(x,y,'.letter');
+  if(letter){{
+    letter.classList.add('hover');
+    const obj='letter-'+letter.dataset.id;
+    if(obj !== hoverObj){{ hoverObj=obj; hoverStart=performance.now(); }}
+    else if(performance.now()-hoverStart>500){{
+      dragging = letter;
+      dragging.classList.add('dragging');
+      hoverObj=null; hoverStart=0;
+      speak("จับ");
+    }}
+  }} else {{
+    hoverObj=null; hoverStart=0;
+  }}
+}}
+
+function checkComplete(){{
+  if(placed.some(x=>!x)) return;
+  const answer = placed.join('');
+  const correct = WORDS[round].replace(/\\s/g,'');
+  if(answer === correct){{
+    score++;
+    document.getElementById('score').textContent = `คะแนน ${{score}}`;
+    msgEl.style.color="#55ff8a";
+    msgEl.textContent = "ถูกต้อง เก่งมาก!";
+    speak("ถูกต้อง เก่งมาก");
+    setTimeout(()=>{{round++; newRound();}}, 1800);
+  }} else {{
+    msgEl.style.color="#ff6666";
+    msgEl.textContent = `ยังไม่ถูก: ${{answer}}`;
+    speak("ลองอีกครั้ง");
+    setTimeout(()=>newRound(), 1800);
+  }}
+}}
+
+function resize(){{ canvas.width=innerWidth; canvas.height=innerHeight; }}
+addEventListener('resize', resize); resize();
+
+async function start(){{
+  document.getElementById('start').style.display='none';
+  newRound();
+  const hands = new Hands({{locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${{f}}`}});
+  hands.setOptions({{maxNumHands:1, modelComplexity:1, minDetectionConfidence:.65, minTrackingConfidence:.65}});
+  hands.onResults(res=>{{
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(res.multiHandLandmarks && res.multiHandLandmarks.length){{
+      const p=res.multiHandLandmarks[0][8];
+      const x=(1-p.x)*innerWidth, y=p.y*innerHeight;
+      cursor.style.display='block';
+      cursor.style.left=x+'px'; cursor.style.top=y+'px';
+      processPointer(x,y);
+    }} else {{
+      cursor.style.display='none';
+    }}
+  }});
+  const camera = new Camera(video, {{onFrame: async()=>{{await hands.send({{image:video}})}}, width:1280, height:720}});
+  camera.start();
+}}
+document.getElementById('start').onclick=start;
+document.getElementById('restart').onclick=()=>location.reload();
+</script>
+</body>
+</html>
+"""
+
+path = Path("/mnt/data/thai_ai_drag_letters_v2.html")
+path.write_text(html, encoding="utf-8")
+path.as_posix()
